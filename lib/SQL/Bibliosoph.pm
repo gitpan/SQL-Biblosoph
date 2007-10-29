@@ -1,0 +1,430 @@
+package SQL::Bibliosoph; {
+	use Object::InsideOut;
+	use strict;
+    use utf8;
+	use Carp;
+	use Data::Dumper;
+	use SQL::Bibliosoph::Query;
+	use SQL::Bibliosoph::CatalogFile;
+
+	use vars qw($VERSION );
+	$VERSION = "1.1";
+
+	our $DEBUG = 0;
+
+	my $STD = <<"END";
+
+--[	 LAST ]		
+	SELECT LAST_INSERT_ID()
+
+--[	FOUND ]
+	SELECT FOUND_ROWS()
+
+--[ ROWS ]
+	SELECT ROW_COUNT()
+
+--[ VERSION ]
+	SELECT VERSION()
+
+END
+
+	my @dbh		:Field 
+				:Arg(Name=> 'dbh', Mandatory=> 1) 
+				:Std(dbh);
+
+	my @catalog	:Field 
+				:Type(ARRAY_ref)
+				:Arg(Name=> 'catalog') 
+				:Std(catalog);
+
+	my @catalog_str	:Field 
+					:Arg(Name=> 'catalog_str') 
+					;
+
+	my @path	:Field 
+				:Arg(Name=> 'path', Default=> '.')
+				:Std(path);
+
+
+	my @constants	:Field 
+					:Arg(Name=> 'constants_from')
+					:Std(constants_from);
+
+	my @constants_path	:Field 
+						:Arg(Name=> 'constants_path')
+						:Std(constants_path);
+
+				
+	my @queries	:Field;		# SQL::Bibliosoph::Query objects
+
+	# Constuctor
+	sub init :Init {
+		my ($self) = @_;
+		say("Constructing Bibliosoph # $$self");;
+		$self->init_all();
+	}
+
+
+	sub init_all :Private {
+		my ($self) = @_;
+
+		# propagates debug
+		$SQL::Bibliosoph::CatalogFile::DEBUG = $DEBUG;
+		$SQL::Bibliosoph::Query::DEBUG = $DEBUG;
+
+		# Start Strings
+		foreach my $s ($STD, $catalog_str[$$self]) {
+			$self->do_all_for(SQL::Bibliosoph::CatalogFile->_parse($s));
+		}
+
+
+		# Start files
+		foreach my $fname (@{$catalog[$$self]}) {
+			$self->do_all_for(
+				SQL::Bibliosoph::CatalogFile->new(
+							file 			=> $fname, 
+							path 			=> $path[$$self],
+				)->read()
+			);
+		}
+	}
+	
+	# -------------------------------------------------------------------------
+	# Extra
+	# -------------------------------------------------------------------------
+
+	sub dump {
+		my ($self) = @_;
+
+		my $str='';
+
+		foreach (keys %{$queries[$$self]}) {
+			$str .= $queries[$$self]->{$_}->dump();
+		}
+		return $str;
+	}
+
+	# -------------------------------------------------------------------------
+	# Privates
+	# -------------------------------------------------------------------------
+	sub do_all_for :Private {
+		my ($self,$qs) = @_;
+
+		croak 'No Database handler at '.__PACKAGE__ if ! $dbh[$$self];
+
+		$self->replace_contants($qs);
+		$self->create_queries_from($qs);
+		$self->create_methods_from($qs);
+	}
+	sub create_methods_from :Private {
+		my ($self,$q)  = @_;
+
+		while ( my ($name,$st) = each (%$q) ) {
+			next if !$st;
+			my $type;
+			if ($st =~ /^\s*\(?\s*(\w+)/ ) {
+				$type = $1;
+			}
+
+			# Small exception: if it is an INSERT but has ON DUPLICATE KEY
+			# set as UPDATE (treated as REPLACE)
+			if ($st =~ /ON\b.*DUPLICATE\b.*KEY\b.*UPDATE\b/is ) {
+				$type = 'UPDATE';
+			}
+
+			# Small exception2: if it is a SELECT with SQL_CALC_FOUND_ROWS
+			if ($st =~ /SQL_CALC_FOUND_ROWS/is ) {
+				$type = 'SELECT_CALC';
+			}
+
+
+			$self->create_method_for(uc($type||''),$name);
+		}
+
+
+		say("Created methods for [".(keys %$q)."] queries.");
+	}
+
+
+
+	
+	sub create_method_for :Private {
+		my ($self,$type,$name) = @_;
+		$_ = $type;
+		SW: {
+			no strict 'refs';
+			no warnings 'redefine';
+
+
+
+			/^SELECT\b/ && do {
+				# Returns
+				# scalar : results
+				
+				# Many
+				*$name = sub {
+					my ($that) = shift;
+					dbg_me('many ',$name,@_);
+					return $queries[$$that]->{$name}->select_many([@_]);
+				};
+
+				# Row
+				my $name_row = 'row_'.$name;
+
+				*$name_row = sub {
+					my ($that) = shift;
+					dbg_me('row  ',$name,@_);
+					return $queries[$$that]->{$name}->select_row([@_]);
+				};
+				last SW;
+			};
+
+
+			/^SELECT_CALC\b/ && do {
+				# Returns
+				# scalar : results
+				# array  : (results, found_rows)
+				
+				# Many
+				*$name = sub {
+					my ($that) = shift;
+					dbg_me('many ',$name,@_);
+
+
+					return wantarray 
+						? $queries[$$that]->{$name}->select_many2([@_])
+						: $queries[$$that]->{$name}->select_many([@_]) 
+						;
+				};
+				last SW;
+			};
+
+
+			/^INSERT/ && do {
+				# Returns
+				#  scalar :  last_insert_id 
+				#  array  :  (last insert_id, row_count)
+
+				# do
+				*$name = sub {
+					my ($that) = shift;
+					dbg_me('inse ',$name,@_);
+					
+					my $ret = $queries[$$that]
+								->{$name}
+								->select_do([@_]);
+
+					return 0 if $ret->rows() == -1;
+								
+					return wantarray 
+						? ($ret->{mysql_insertid}, $ret->rows() ) 
+						:  $ret->{mysql_insertid}
+						;
+
+				};
+				last SW;
+			};	
+
+			if ( /^UPDATE/ ) {
+				# Update has the same query than unknown
+			}
+
+			# Returns
+			#  scalar :  SQL_ROWS (modified rows)
+			*$name = sub {
+				my ($that) = shift;
+				dbg_me('oth  ',$name,@_);
+
+				return $queries[$$that]
+							->{$name}
+							->select_do([@_])
+							->rows();
+			};
+		}
+	}
+
+	#------------------------------------------------------------------
+	sub replace_contants :Private {
+		my ($self,$qs)  =@_;
+
+		my $p = $constants[$$self];
+		return if !$p;
+
+
+		eval {
+			push @INC, $constants_path[$$self] if $constants_path[$$self];
+
+			# Read constants
+			eval "require $p";
+			import $p;
+			my @cs = Package::Constants->list($p);
+
+			say("Constants from $p [".@cs."] ");
+
+
+			# DO Replace constants
+			foreach my $v (values %$qs) {
+				next if !$v;
+				foreach my $key (@cs) {
+					my $value = eval "$key" ;
+					$v =~ s/\b$key\b/$value/g;
+				}
+			}
+		};
+		if ($@) {
+			die "error importing constants : $@";
+		}
+	}
+
+
+	#------------------------------------------------------------------
+
+	sub dbg_me :Private {
+		my ($what,$name,@values) =@_;
+		say("$what $name "
+				.   join(',', map { defined $_ ?  $_  : 'NULL' } @values ) 
+		);
+	}
+
+	#------------------------------------------------------------------
+	sub create_queries_from :Private {
+		my ($self,$qs) = @_;
+
+		while ( my ($name,$st) = each (%$qs) ) {
+			next if !$st;
+
+			# Previous exists?
+			if ( $queries[$$self]->{$name}  ) {
+				delete $queries[$$self]->{$name};
+			}
+
+			#say("\tpreparing $name");
+
+			# Prepare the statement
+			$queries[$$self]->{$name}
+		   		= SQL::Bibliosoph::Query->new(dbh=>$dbh[$$self],st=>$st);	
+		}
+	}
+
+	#------------------------------------------------------------------
+	sub say {
+		print STDERR "@_\n" if $DEBUG; 
+	}
+
+
+}
+
+
+
+1;
+
+__END__
+
+=head1 NAME
+
+SQL::Bibliosoph
+
+=head1 VERSION
+
+1.0
+
+=head1 SYNOPSIS
+
+	use SQL::Bibliosoph;
+
+	my $bs = SQL::Biblioshoph->new(
+			dsn		 => $database_handle,
+			catalog => [ qw(users products <billing) ],
+	);
+
+	# Using dynamic generated functions.
+	#    `get_featured_products` and `get_one` should be 
+	#    defined SQL statements.
+	
+	my $products_ref = $bs->get_featured_products($seasson_id);
+
+	# Selecting only one row (add row_ at the begining)
+	my $product_ref = $bs->row_get_one($product_id);
+	
+	# Selecting only one value
+	my $product_name = $bs->row_get_one($product_id)->[1];
+
+
+=head1 DESCRIPTION
+
+SQL::Bibliosoph is a SQL statement library engine that allow to clearly separate SQL statements from PERL code. It is currently tested on MySQL 5.x, but it should be easly ported to other engines. 
+
+The catalog files are prepared a the initialization, for performance reasons. The use of prepared statement also helps to prevents SQL injection attacks.  SQL::Bibliosoph supports bind parameters in statements definition and bind parements reordering. (SEE SQL::Bibliosoph::CatalogFile for details). 
+
+
+All functions throw 'carp' on error. The error message is 'SQL ERROR' and the mysql error reported by the driver.
+
+=head1 Constructor parameters
+
+=head3 dsn
+
+The database handler. For example:
+
+	my $dbh = DBI->connect($dsn, ...);
+	my $bb = SQL::Bibliosoph(dsn=>$dsn, ...);
+
+=head3 catalog 
+	
+An array ref containg filenames with the queries. This files should use de SQL::Bibliosoft::CatalogFile format (SEE Perldoc for details). The suggested extension for these files is 'bb'. The name can be preceded with a "<" forcing the catalog the be open in "read-only" mode. In the mode, UPDATE, INSERT and REPLACE statement will be parsed. Note the calling a SQL procedure or function that actually modifies the DB is still allowed!
+
+All the catalogs will be merged, be carefull with namespace collisions. the statement will be prepared at module constuction.
+
+=head3 catalog_str 
+	
+Allows to define a SQL catalog using a string (not a file). The queries will be merged with Catalog files (if any).			
+	
+=head3 constants_from 
+
+In order to use the same constants in your PERL code and your SQL modules, you can declare a module using `constants_from` paramenter. Constants exported in that module (using @EXPORT) will be replaced in all catalog file before SQL preparation.
+
+
+=head3 constants_path
+
+Define the search path for `constants_from`  PERL modules.
+
+
+=head1 Bibliosoph
+
+n. person having deep knowledge of books. bibliognostic.
+
+=head1 AUTHORS
+
+SQL::Biblosoph by Matias Alejo Garcia (matias at confronte.com) and Lucas Lain (lucas at confronte.com).
+
+=head1 COPYRIGHT
+
+Copyright (c) 2007 Matias Alejo Garcia. All rights reserved.
+This program is free software; you can redistribute it and/or
+modify it under the same terms as Perl itself.
+
+=head1 SUPPORT / WARRANTY
+
+The SQL::Bibliosoph is free Open Source software. IT COMES WITHOUT WARRANTY OF ANY KIND.
+
+
+=head1 SEE ALSO
+	
+SQL::Bibliosoph::CatalogFile
+
+At	http://nits.com.ar/bibliosoph you can find:
+	* Examples
+	* VIM syntax highlighting definitions for bb files
+	* CTAGS examples for indexing bb files.
+
+
+=head1 ACKNOWLEDGEMENTS
+
+To Confronte.com and its associates to support the development of this module.
+
+=head1 BUGS
+
+This module is only tested with MySQL. Migration to other DB engines should be
+simple accomplish. If you would like to use Bibliosoph with other DB, please 
+let me know and we can help you if you do the testing.
+	
+
