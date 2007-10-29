@@ -8,7 +8,7 @@ package SQL::Bibliosoph; {
 	use SQL::Bibliosoph::CatalogFile;
 
 	use vars qw($VERSION );
-	$VERSION = "1.1";
+	$VERSION = "1.2";
 
 	our $DEBUG = 0;
 
@@ -322,7 +322,7 @@ __END__
 
 =head1 NAME
 
-SQL::Bibliosoph
+SQL::Bibliosoph - A SQL Statements Library 
 
 =head1 VERSION
 
@@ -337,17 +337,63 @@ SQL::Bibliosoph
 			catalog => [ qw(users products <billing) ],
 	);
 
-	# Using dynamic generated functions.
-	#    `get_featured_products` and `get_one` should be 
-	#    defined SQL statements.
+	# Using dynamic generated functions.  Wrapper funtions 
+	# are automaticaly created on module initialization.
+	# Query should something like:
+
+	# --[ get_products ]
+	#  SELECT id,name FROM  product WHERE country = ?
 	
-	my $products_ref = $bs->get_featured_products($seasson_id);
+	my $products_ref = $bs->get_products($country);
+
+	# Forcing numbers in parameters
+	# Query:
+
+	# --[ get_products ]
+	#  SELECT id,name FROM  product WHERE country = ? LIMIT #?,#?
+
+	
+	# Parameter ordering and repeating
+	# Query:
+	
+	# --[ get_products ]
+	#  SELECT id,name 
+	#  		FROM  product 
+	#  		WHERE 1? IS NULL OR country = 1? 
+	#  		 AND  price > 2? * 0.9 AND print > 2? * 1.1
+	#  		LIMIT #3?,#4?
+	
+	my $products_ref = $bs->get_products($country,$price,$start,$limit);
+
 
 	# Selecting only one row (add row_ at the begining)
+	# Query:
+	
+	# --[ get_one ]
+	#  SELECT name,age FROM  person where id = ?;
+	
 	my $product_ref = $bs->row_get_one($product_id);
 	
-	# Selecting only one value
+	# Selecting only one value (same query as above)
+	
 	my $product_name = $bs->row_get_one($product_id)->[1];
+
+	# Inserting a row, with an auto_increment PK.
+	# Query:
+	
+	# --[ insert_person ]
+	#  INSERT INTO person (name,age) VALUES (?,?);
+	
+	my $last_insert_id = $bs->insert_person($name,$age);
+
+
+	# Updating some rows
+	# Query:
+	
+	# --[ age_persons ]
+	#  UPDATE person SET age = age + 1 WHERE birthday = ?
+	
+	my $updated_persons = $bs->age_persons($today);
 
 
 =head1 DESCRIPTION

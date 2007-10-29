@@ -7,6 +7,8 @@ package SQL::Bibliosoph::Query; {
 	use Data::Dumper;
 	use DBI;
 
+	use vars qw($VERSION );
+	$VERSION = "1.2";
 
 	our $DEBUG = 1;
 

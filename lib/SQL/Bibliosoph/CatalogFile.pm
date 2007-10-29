@@ -6,6 +6,9 @@ package SQL::Bibliosoph::CatalogFile; {
 	use Data::Dumper;
 	use vars qw(@INC);
 
+	use vars qw($VERSION );
+	$VERSION = "1.2";
+
 	our $DEBUG = 1;
 
 	my @abs_file 	:Field ;
